@@ -1,4 +1,5 @@
 import type { BlockedTarget, Ledger, LedgerTask } from '../types/index.d.ts'
+import { ownsMatch } from './rules/tasks.ts'
 import { commandWords, expandAssignments, programName, segmentsOf, type Dialect, type Segment } from './shell.ts'
 
 // What the session actually did, as the mod observed it from real tool calls and results.
@@ -22,7 +23,7 @@ export function taskMeta(metadata: unknown): TaskMeta {
   if (size !== undefined) meta.size = size
   const parent = text(raw.parent) ?? (typeof raw.parent === 'number' ? String(raw.parent) : undefined)
   if (parent !== undefined) meta.parent = parent.replace(/^#/, '')
-  if (owns !== undefined && owns.length > 0) meta.owns = owns
+  if (owns !== undefined) meta.owns = owns
   const verify = text(raw.verify)
   if (verify !== undefined) meta.verify = verify
   const unlazy = text(raw.unlazy)
@@ -56,6 +57,14 @@ export function recordTaskUpdated(
   }
 }
 
+// Several tasks can be in progress at once; a task that declared `owns` only gets the edits to
+// its own files (an empty list owns none), so a parallel task is not charged with them.
+function ownsPath(task: LedgerTask, path: string): boolean {
+  if (task.owns === undefined) return true
+  const target = path.replaceAll('\\', '/')
+  return task.owns.some(glob => [glob, `**/${glob}`, `**/${glob}/**`].some(pattern => ownsMatch(pattern, target)))
+}
+
 export function creditTasks(ledger: Ledger, edit: { path: string } | undefined, check: { command: string; at: number } | undefined): Ledger {
   if (edit === undefined && check === undefined) return ledger
   return {
@@ -64,7 +73,9 @@ export function creditTasks(ledger: Ledger, edit: { path: string } | undefined, 
       if (task.status === 'completed') return task
       const next = { ...task }
       const active = task.status === 'in_progress'
-      if (active && edit !== undefined && !(task.files ?? []).includes(edit.path)) next.files = [...(task.files ?? []), edit.path].slice(-100)
+      if (active && edit !== undefined && ownsPath(task, edit.path) && !(task.files ?? []).includes(edit.path)) {
+        next.files = [...(task.files ?? []), edit.path].slice(-100)
+      }
       const matches = task.verify === undefined ? active : sameCheck(task.verify, check?.command ?? '')
       if (check !== undefined && matches) next.verifiedAt = check.at
       return next
@@ -124,6 +135,17 @@ function cap<T>(list: T[], size: number): T[] {
 
 export function startWindow(ledger: Ledger, now: number): Ledger {
   return { ...ledger, windowStart: now, edits: [], verifications: [], stopBlocks: 0, blockedTargets: [] }
+}
+
+export function recordLookedUpPids(ledger: Ledger, pids: readonly { pid: string; name: string }[], now: number): Ledger {
+  if (pids.length === 0) return ledger
+  const fresh = new Set(pids.map(item => item.pid))
+  const kept = (ledger.lookedUpPids ?? []).filter(item => !fresh.has(item.pid))
+  return { ...ledger, lookedUpPids: cap([...kept, ...pids.map(item => ({ ...item, at: now }))], 200) }
+}
+
+export function recordAttributionLeak(ledger: Ledger, leak: { dir: string; sha: string; at: number } | null): Ledger {
+  return { ...ledger, attributionLeak: leak }
 }
 
 export function recordBlockedTargets(ledger: Ledger, targets: readonly BlockedTarget[]): Ledger {

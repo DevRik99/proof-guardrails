@@ -210,6 +210,87 @@ export function blockedTargetsOf(shell: ShellFacts, rules: readonly string[], no
   ]
 }
 
+// comment-ok: decisión de diseño. Un PID que salió de buscar por nombre cuenta como matar por
+// nombre (rodeo visto en la sesión atacante: pgrep, luego kill 2413); cualquier otro PID, como el
+// de un servidor que lanzó la sesión, sigue permitido para no pedir confirmación al detenerlo.
+const PID_LOOKUP = /\b(pgrep|pidof|lsof\s+(?:-\S+\s+)*-t\b|ps\b|get-process|gps|tasklist)/i
+
+export type LookedUpPid = { pid: string; name: string }
+
+export function lookedUpPids(shell: ShellFacts, output: string): LookedUpPid[] {
+  if (!PID_LOOKUP.test(shell.command)) return []
+  const names = [
+    ...killTargets(shell),
+    ...[...shell.command.matchAll(/\bgrep\s+(?:-\S+\s+)*["']?([\w.@:-]{2,})/g)].map(match => match[1]!),
+    ...[...shell.command.matchAll(/\b(?:get-process|gps)\s+(?:-name\s+)?["']?([\w.@-]{2,})/gi)].map(match => match[1]!),
+    ...[...shell.command.matchAll(/imagename\s+eq\s+([\w.@-]{2,})/gi)].map(match => match[1]!),
+  ].filter(name => !/^\d+$/.test(name))
+  const name = names[0] ?? 'un proceso buscado por nombre'
+  const command = shell.command
+  const isPid = (token: string | undefined): token is string => token !== undefined && /^\d{2,7}$/.test(token)
+  const pick = (tokens: string[]): string[] => {
+    if (/\bpgrep\b/.test(command)) return isPid(tokens[0]) ? [tokens[0]] : []
+    if (/\b(pidof|lsof\s+(?:-\S+\s+)*-t\b)/.test(command)) return tokens.filter(isPid)
+    if (/\b(get-process|gps)\b/i.test(command)) return isPid(tokens[tokens.length - 3]) ? [tokens[tokens.length - 3]!] : []
+    if (/\btasklist\b/i.test(command)) return isPid(tokens[1]) ? [tokens[1]] : []
+    return isPid(tokens[0]) ? [tokens[0]] : isPid(tokens[1]) ? [tokens[1]] : []
+  }
+  const pids = new Set<string>()
+  for (const line of output.split('\n')) {
+    const tokens = line.trim().split(/\s+/).filter(Boolean)
+    if (tokens.length === 0) continue
+    const ownList = /\b(pgrep|pidof|lsof\s+(?:-\S+\s+)*-t\b)/.test(command)
+    const named = ownList || names.length === 0 || names.some(item => line.toLowerCase().includes(item.toLowerCase()))
+    if (named) for (const pid of pick(tokens)) pids.add(pid)
+  }
+  return [...pids].map(pid => ({ pid, name }))
+}
+
+function killedPids(shell: ShellFacts): string[] {
+  const out: string[] = []
+  for (const segment of resolved(shell)) {
+    const words = commandWords(segment)
+    const program = programName(words[0])
+    const lower = words.map(word => word.toLowerCase())
+    if (program === 'kill' && !lower.some(word => word === '-name' || word === '-processname')) {
+      out.push(...positionals(words.slice(1)).filter(arg => /^\d{2,7}$/.test(arg)))
+    }
+    if (['stop-process', 'spps', 'kill'].includes(program)) {
+      lower.forEach((word, index) => {
+        if (word === '-id' && words[index + 1] !== undefined) out.push(...words[index + 1]!.split(','))
+      })
+    }
+    if (program === 'taskkill') {
+      lower.forEach((word, index) => {
+        if (word === '/pid' && words[index + 1] !== undefined) out.push(words[index + 1]!)
+      })
+    }
+  }
+  return out.map(pid => pid.trim()).filter(pid => /^\d{2,7}$/.test(pid))
+}
+
+export function pidKillFindings(shell: ShellFacts, looked: readonly LookedUpPid[]): Finding[] {
+  const byPid = new Map(looked.map(item => [item.pid, item.name]))
+  const hits = killedPids(shell).filter(pid => byPid.has(pid))
+  if (hits.length === 0) return []
+  return [finding(
+    'irreversible.destructive',
+    `Matar ${hits.map(pid => `el PID ${pid} («${byPid.get(pid)}»)`).join(', ')}, que salió de buscar el proceso por nombre, es matar por nombre en dos pasos: puede cerrar programas ajenos a la tarea.`,
+  )]
+}
+
+export function sameCommandCommitFile(
+  shell: ShellFacts,
+  hasTrailer: (text: string) => boolean,
+  messageFiles: readonly string[],
+  written: readonly string[],
+): Finding[] {
+  const plain = (path: string) => path.replace(/^\.\//, '')
+  const fresh = messageFiles.filter(file => written.map(plain).includes(plain(file)))
+  if (fresh.length === 0 || !hasTrailer(shell.command.replace(/\\n/g, '\n'))) return []
+  return [finding('attribution.strip', `El mensaje del commit se escribe en \`${fresh[0]}\` en este mismo comando y trae coautoría de IA. Quítala del texto.`)]
+}
+
 function mentions(text: string, target: string): boolean {
   const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`(^|[^\\w.-])${escaped}($|[^\\w-])`, 'i').test(text.replace(/\\/g, '/'))

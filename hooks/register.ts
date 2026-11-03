@@ -8,13 +8,17 @@ import { DISCIPLINE } from '../src/discipline.ts'
 import { findingsFor, judge, render, type Context, type Judged, type Verdict } from '../src/evaluate.ts'
 import { shellOf, textOf, writeIntentOf } from '../src/facts.ts'
 import {
-  creditTasks, decisiveChecks, emptyLedger, isVerificationCommand, openTasks, ranNoTests, recordBlockedTargets, recordDecision, recordEdit,
-  recordResearch, recordTaskCreated, recordTaskUpdated, recordVerification, startWindow, unlazyGates, unverifiedEdits,
+  creditTasks, decisiveChecks, emptyLedger, isVerificationCommand, openTasks, ranNoTests, recordAttributionLeak, recordBlockedTargets,
+  recordDecision, recordEdit, recordLookedUpPids, recordResearch, recordTaskCreated, recordTaskUpdated, recordVerification, startWindow,
+  unlazyGates, unverifiedEdits,
   type Ledger, type LedgerGate,
 } from '../src/ledger.ts'
 import { isNativeRule, withNative } from '../src/native.ts'
-import { commitMessageFiles, hasAttributionTrailer, stripAttribution } from '../src/rules/attribution.ts'
-import { blockedTargetsOf, codeFileFindings, lockedTargetFindings, packageScriptsRun, scriptRuns, shellOfText } from '../src/rules/evasion.ts'
+import { commitMessageFiles, hasAttributionTrailer, isGitCommit, stripAttribution } from '../src/rules/attribution.ts'
+import {
+  blockedTargetsOf, codeFileFindings, lockedTargetFindings, lookedUpPids, packageScriptsRun, scriptRuns, shellOfText,
+} from '../src/rules/evasion.ts'
+import { commandWords, gitSubcommand, programName } from '../src/shell.ts'
 import { isReadOnlyShell, leafGatesFinding, leafLedgersFor, shellWriteTargets, workPaths } from '../src/rules/tasks.ts'
 import type { Finding, ShellFacts, ToolFacts, WriteFacts } from '../src/rules/types.ts'
 import { addedLines, newComments } from '../src/rules/writes.ts'
@@ -295,7 +299,7 @@ async function observe(
   tool: string,
   input: Input,
   ran: { deny?: string; isError?: boolean; result?: unknown; text?: string },
-): Promise<{ noTests: boolean }> {
+): Promise<{ noTests: boolean; commitNote?: string }> {
   if (ran.deny !== undefined) return { noTests: false }
   const ok = ran.isError !== true
   const now = Date.now()
@@ -340,7 +344,45 @@ async function observe(
   })
   const touchedTasks = /^Task(Create|Update)$/.test(tool) || decisive !== '' || intent !== undefined || shellWrites.length > 0
   if (ok && touchedTasks && (after.tasks.length > 0 || tool === 'TaskUpdate')) await saveTasks(engine, after.tasks).catch(() => undefined)
-  return { noTests }
+  if (ok && shell !== undefined) {
+    const looked = lookedUpPids(shell, ran.text ?? '')
+    if (looked.length > 0) await update(engine, ledgerAtom, ledger => recordLookedUpPids(ledger, looked, now)).catch(() => undefined)
+  }
+  const commitNote = ok && shell !== undefined && isGitCommit(shell.command, shell.dialect) ? await checkHeadAttribution(engine, shell, cwd) : undefined
+  return { noTests, commitNote }
+}
+
+function commitDir(shell: ShellFacts, cwd: string): string {
+  const absolute = (path: string) => /^([a-z]:)?[\\/]/i.test(path)
+  const join = (base: string, path: string) => (absolute(path) ? path : `${base.replace(/[\\/]+$/, '')}/${path}`)
+  let dir = cwd
+  for (const segment of shell.segments) {
+    const words = commandWords(segment)
+    const program = programName(words[0])
+    if (['cd', 'pushd', 'set-location', 'sl'].includes(program) && words[1] !== undefined) dir = join(dir, words[1])
+    if (program === 'git' && ['commit', 'interpret-trailers'].includes(gitSubcommand(words).name)) {
+      const at = words.indexOf('-C')
+      return at !== -1 && words[at + 1] !== undefined ? join(dir, words[at + 1]!) : dir
+    }
+  }
+  return dir
+}
+
+// The last word on attribution is the commit itself: whatever route put a trailer in (a file, a
+// template, a hook, an amend), HEAD's message is read after the commit and a push waits until
+// the commit is amended.
+async function checkHeadAttribution(engine: $, shell: ShellFacts, cwd: string): Promise<string | undefined> {
+  const dir = commitDir(shell, cwd)
+  const ran = await engine.process.run(['git', '-C', dir, 'log', '-1', '--format=%H%n%B'], { timeoutMs: 10_000 }).catch(() => undefined)
+  if (ran === undefined || ran.exitCode !== 0) return undefined
+  const [sha = '', ...body] = ran.stdout.split('\n')
+  const leaked = hasAttributionTrailer(body.join('\n'))
+  await update(engine, ledgerAtom, ledger =>
+    recordAttributionLeak(ledger, leaked ? { dir, sha, at: Date.now() } : ledger.attributionLeak?.dir === dir ? null : ledger.attributionLeak ?? null),
+  ).catch(() => undefined)
+  return leaked
+    ? `[gates:attribution.strip] El commit ${sha.slice(0, 7)} quedó con coautoría de IA en su mensaje. Enmiéndalo sin esa línea (git commit --amend); hasta entonces el push queda bloqueado.`
+    : undefined
 }
 
 // $.state does not outlive the process: a container restart that resumes the session starts
@@ -656,6 +698,7 @@ export const register: Register = on => {
         if (synced !== undefined) notes.push(synced)
       }
       const ranOk = ran.deny === undefined && (ran as { isError?: boolean }).isError !== true
+      if (observed.commitNote !== undefined) notes.push(observed.commitNote)
       if (observed.noTests) {
         notes.push(
           '[gates:completion.verify-after-edit] Esta verificación no corrió ningún test (el runner no encontró ninguno), así que no cuenta como prueba. ' +

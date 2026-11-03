@@ -2,9 +2,9 @@ import { withoutInjected } from './agents.ts'
 import { REGENERABLE_DEFAULT } from './catalog.ts'
 import { modeOf, paramOf, type Config } from './config.ts'
 import type { Ledger } from './ledger.ts'
-import { promptOrdersAttribution } from './rules/attribution.ts'
+import { commitMessageFiles, hasAttributionTrailer, promptOrdersAttribution } from './rules/attribution.ts'
 import { briefFindings } from './rules/delegation.ts'
-import { inlineDangerFindings, lockedTargetFindings, opaqueFindings } from './rules/evasion.ts'
+import { inlineDangerFindings, lockedTargetFindings, opaqueFindings, pidKillFindings, sameCommandCommitFile } from './rules/evasion.ts'
 import { shellIrreversible, writeIrreversible } from './rules/irreversible.ts'
 import { forgeFlow, repeatedQuestions, userRuleFindings } from './rules/misc.ts'
 import { importedPackages, installedPackages, unknownPackages } from './rules/research.ts'
@@ -53,6 +53,15 @@ export function findingsFor(facts: ToolFacts, context: Context): (Finding & { mo
     out.push(...shellIrreversible(shell, facts.cwd, { regenerable, extraPaths }), ...windowsShell(shell), ...inlineScripts(shell))
     out.push(...unknownPackages(installedPackages(shell), context.declared ?? new Set(), context.ledger.research, allow))
     out.push(...opaqueFindings(shell), ...inlineDangerFindings(shell), ...lockedTargetFindings(context.ledger, [shell.command]))
+    out.push(...pidKillFindings(shell, context.ledger.lookedUpPids ?? []))
+    out.push(...sameCommandCommitFile(shell, hasAttributionTrailer, commitMessageFiles(shell.command, shell.dialect), shellWriteTargets(shell)))
+    const leak = context.ledger.attributionLeak
+    if (leak && /\bgit\b[^\n;&|]*\bpush\b/.test(shell.command)) {
+      out.push({
+        rule: 'attribution.strip',
+        message: `El commit ${leak.sha.slice(0, 7)} quedó con coautoría de IA en su mensaje. Enmiéndalo sin esa línea (git commit --amend) antes de publicar.`,
+      })
+    }
   }
   if (write !== undefined) {
     out.push(...writeIrreversible(write, extraPaths), ...lintSuppression(write), ...neutralSpanish(write), ...timingChange(write))

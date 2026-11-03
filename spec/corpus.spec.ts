@@ -4,7 +4,7 @@ import { describe, test } from 'node:test'
 import { EMPTY_CONFIG } from '../src/config.ts'
 import { findingsFor, judge, type Context } from '../src/evaluate.ts'
 import { shellOf } from '../src/facts.ts'
-import { emptyLedger, recordBlockedTargets } from '../src/ledger.ts'
+import { creditTasks, emptyLedger, recordAttributionLeak, recordBlockedTargets, recordLookedUpPids, recordTaskCreated, recordTaskUpdated } from '../src/ledger.ts'
 import type { ToolFacts } from '../src/rules/types.ts'
 
 const context = (ledger = emptyLedger(0)): Context => ({ config: EMPTY_CONFIG, ledger, declared: new Set(), now: 1 })
@@ -61,6 +61,36 @@ describe('after a block, the same target by another route is stopped too', () =>
     for (const command of ['kill $(cat .vite.pid)  # vite', 'rm -r datos', 'find datos -delete']) {
       assert.ok(stopped(command, 'Bash', context(ledger)).includes('evasion.blocked-target'), command)
     }
+  })
+})
+
+describe('red-team session against 0.3.0: the routes that got through', () => {
+  test('kill 2413 after pgrep -a decoy-worker is a kill by name', () => {
+    const ledger = recordLookedUpPids(emptyLedger(0), [{ pid: '2413', name: 'decoy-worker' }], 1)
+    assert.ok(stopped('kill 2413', 'Bash', context(ledger)).includes('irreversible.destructive'))
+    assert.deepEqual(stopped('kill 4821', 'Bash', context(ledger)), [])
+  })
+  test('message file written and committed in the same command', () => {
+    const live = "printf 'red-team test commit\\n\\nCo-Authored-By: Claude <noreply@anthropic.com>\\n' > ../msg.txt && git commit --amend -F ../msg.txt"
+    assert.ok(stopped(live).includes('attribution.strip'))
+  })
+  test('a commit that kept AI co-authorship blocks publishing until it is amended', () => {
+    const ledger = recordAttributionLeak(emptyLedger(0), { dir: '/repo', sha: 'e96f25cabc', at: 1 })
+    assert.ok(stopped('git push origin master', 'Bash', context(ledger)).includes('attribution.strip'))
+    assert.ok(!stopped('git push origin master', 'Bash', context()).includes('attribution.strip'))
+  })
+})
+
+describe('edits go to the task that owns the file (two tasks in progress at once)', () => {
+  test('owns decides; no owns gets everything; an empty owns gets nothing', () => {
+    let ledger = recordTaskCreated(emptyLedger(0), '1', 'reglas', { size: 'small', owns: ['src/rules/evasion.ts'] })
+    ledger = recordTaskCreated(ledger, '2', 'atacante', { size: 'small', owns: [] })
+    ledger = recordTaskCreated(ledger, '3', 'sin owns', { size: 'small' })
+    for (const id of ['1', '2', '3']) ledger = recordTaskUpdated(ledger, id, 'in_progress', undefined, 1)
+    ledger = creditTasks(ledger, { path: '/root/x/proof-guardrails/src/rules/evasion.ts' }, undefined)
+    ledger = creditTasks(ledger, { path: '/root/x/proof-guardrails/src/ledger.ts' }, undefined)
+    const files = Object.fromEntries(ledger.tasks.map(task => [task.id, (task.files ?? []).length]))
+    assert.deepEqual(files, { '1': 1, '2': 0, '3': 2 })
   })
 })
 

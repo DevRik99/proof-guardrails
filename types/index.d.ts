@@ -10,6 +10,8 @@ export type Ledger = {
   decisions: { rule: string; effect: string; message: string; at: number }[]
   tasks: LedgerTask[]
   blockedTargets?: BlockedTarget[]
+  lookedUpPids?: { pid: string; name: string; at: number }[]
+  attributionLeak?: { dir: string; sha: string; at: number } | null
 }
 
 export type BlockedTarget = {
