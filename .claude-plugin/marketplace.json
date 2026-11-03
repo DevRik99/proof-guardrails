@@ -1,0 +1,12 @@
+{
+  "name": "proof-guardrails",
+  "owner": { "name": "Devrik", "url": "https://github.com/DevRik99" },
+  "metadata": { "description": "proof-guardrails: guardrails deterministas para Claude que exigen prueba antes de dar algo por terminado." },
+  "plugins": [
+    {
+      "name": "proof-guardrails",
+      "source": "./",
+      "description": "Guardrails deterministas para Claude: confirma lo irreversible, exige evidencia para terminar, parte el trabajo con unlazy y muestra con qué choca cada acción."
+    }
+  ]
+}
