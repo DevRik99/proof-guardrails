@@ -1,5 +1,5 @@
 import type { Ledger, LedgerTask } from '../types/index.d.ts'
-import { commandWords, programName, segmentsOf, type Dialect } from './shell.ts'
+import { commandWords, programName, segmentsOf, type Dialect, type Segment } from './shell.ts'
 
 // What the session actually did, as the mod observed it from real tool calls and results.
 // Completion rules read this instead of trusting what the model writes about its own work.
@@ -76,15 +76,26 @@ function squash(command: string): string {
   return command.replace(/\s+/g, ' ').trim()
 }
 
-const LEDGER_TARGET = /gate-check\.mjs\b.*?--reverify\s+(\S+\.md)/
+// Every ledger a gate-check --reverify run names, wherever the flags sit: textstats ran
+// `--reverify --jobs 1 leaf-1.1.md leaf-1.2.md …` and none of its leaves was credited.
+export function reverifiedLedgers(command: string): string[] {
+  const out: string[] = []
+  for (const match of squash(command).matchAll(/gate-check\.mjs\b([^&|;]*)/g)) {
+    const args = match[1] ?? ''
+    if (!/(^|\s)--reverify(\s|$)/.test(args)) continue
+    out.push(...[...args.matchAll(/(?:^|\s)([^\s-][^\s]*\.md)(?=\s|$)/g)].map(item => item[1]!.replaceAll('\\', '/')))
+  }
+  return out
+}
 
 export function sameCheck(declared: string, ran: string): boolean {
   const want = squash(declared)
   if (want === '') return false
   if (squash(ran).includes(want)) return true
-  const ledger = LEDGER_TARGET.exec(want)?.[1]?.replaceAll('\\', '/')
-  const target = LEDGER_TARGET.exec(squash(ran))?.[1]?.replaceAll('\\', '/')
-  return ledger !== undefined && target !== undefined && (target.endsWith(ledger) || ledger.endsWith(target))
+  const wanted = reverifiedLedgers(want)
+  if (wanted.length === 0) return false
+  const ranLedgers = reverifiedLedgers(ran)
+  return wanted.every(ledger => ranLedgers.some(target => target.endsWith(ledger) || ledger.endsWith(target)))
 }
 
 export function openTasks(ledger: Ledger): Ledger['tasks'] {
@@ -164,15 +175,29 @@ function isCheckSegment(words: readonly string[]): boolean {
   return false
 }
 
+// Limitation: only NAME=value segments of the same command are followed; a value that
+// itself holds $(…) is substituted as written, never executed.
+function expandedSegments(command: string, dialect: Dialect): Segment[] {
+  const vars = new Map<string, string>()
+  const substitute = (text: string) => text.replace(/\$\{(\w+)\}|\$(\w+)/g, (whole, braced, bare) => vars.get(braced ?? bare) ?? whole)
+  return segmentsOf(command, dialect).map(segment => {
+    const words = segment.words.map(substitute)
+    if (words.length > 0 && words.every(word => /^[A-Za-z_]\w*=/.test(word))) {
+      for (const word of words) vars.set(word.slice(0, word.indexOf('=')), word.slice(word.indexOf('=') + 1))
+    }
+    return { ...segment, words, raw: substitute(segment.raw) }
+  })
+}
+
 export function isVerificationCommand(command: string, dialect: Dialect): boolean {
-  return segmentsOf(command, dialect).some(segment => isCheckSegment(commandWords(segment)))
+  return expandedSegments(command, dialect).some(segment => isCheckSegment(commandWords(segment)))
 }
 
 // A check proves something only when its exit code is the command's: `npm test | tail`
 // and `npm test; echo` exit 0 with failing tests. Only a check followed by nothing but
 // `&&` decides the result.
 export function decisiveChecks(command: string, dialect: Dialect): string[] {
-  const segments = segmentsOf(command, dialect)
+  const segments = expandedSegments(command, dialect)
   return segments
     .filter((segment, index) => isCheckSegment(commandWords(segment)) && segments.slice(index).every(item => item.next === undefined || item.next === '&&'))
     .map(segment => segment.raw)

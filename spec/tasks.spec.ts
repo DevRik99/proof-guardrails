@@ -54,6 +54,20 @@ describe('a check counts only when its exit code is the command exit code', () =
       assert.ok(!ranNoTests(output), output)
     }
   })
+  test('gate-check runs seen live in textstats credit their leaves (steps 13 and 19 were missed)', () => {
+    const skill = '/c/plugins/cache/proof-guardrails/0.2.0/skills/unlazy'
+    const declared = (leaf: string) => reverifyCommand(skill, 'textstats', leaf)
+    const step13 = `node ${skill}/scripts/gate-check.mjs --root . --cwd . --reverify --jobs 1 .unlazy/textstats/gates/leaf-1.1.md .unlazy/textstats/gates/leaf-1.2.md .unlazy/textstats/GATES.md`
+    const ran13 = decisiveChecks(step13, 'posix').join(' && ')
+    assert.ok(sameCheck(declared('1.1'), ran13))
+    assert.ok(sameCheck(declared('1.2'), ran13))
+    assert.ok(!sameCheck(declared('1.3'), ran13))
+    const step19 = `G=${skill}/scripts/gate-check.mjs && node $G --root . --cwd . --reverify .unlazy/textstats/gates/leaf-1.1.md && node $G --root . --cwd . --reverify .unlazy/textstats/gates/leaf-1.4.md`
+    const ran19 = decisiveChecks(step19, 'posix').join(' && ')
+    assert.ok(sameCheck(declared('1.1'), ran19))
+    assert.ok(sameCheck(declared('1.4'), ran19))
+    assert.ok(!sameCheck(declared('1.2'), ran19))
+  })
   test('the files a check writes its output to can be read back', () => {
     assert.deepEqual(checkRedirects('cd x && npm test > out.txt 2>&1', 'posix'), ['out.txt'])
     assert.deepEqual(checkRedirects('npm test 2>/dev/null', 'posix'), [])
