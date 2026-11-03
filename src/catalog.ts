@@ -37,6 +37,7 @@ export const CATALOG: readonly RuleInfo[] = [
   { id: 'forge.flow', mode: 'off', summary: 'Sin run activo de forge no se edita; con run, edita un subagente' },
   { id: 'tasks.split', mode: 'deny', summary: 'Tarea no chica sin subtareas nativas, o subtareas sin verificación declarada (split con el método de unlazy)', params: { exempt: ['small', 'trivial'], maxFilesSmall: 3 } },
   { id: 'tasks.plan-required', mode: 'deny', summary: 'Un pedido que ya toca más de maxFiles archivos sin plan partido: partirlo con unlazy (via "unlazy") o también a mano con subtareas nativas (via "any")', params: { maxFiles: 3, via: 'unlazy' } },
+  { id: 'tasks.leaf-gates-first', mode: 'deny', summary: 'Escribir en archivos de una hoja de unlazy antes de que exista su .unlazy/<scope>/gates/leaf-<id>.md' },
   { id: 'tasks.from-unlazy', mode: 'warn', summary: 'Crea las tareas nativas (madre + una por hoja, con su gate-check como verify) al escribir un .unlazy/<scope>/PLAN.md' },
   { id: 'tasks.small-grew', mode: 'deny', summary: 'Tarea declarada chica que ya toca más archivos que maxFilesSmall (parámetro en tasks.split): partirla antes de seguir' },
   { id: 'tasks.verify-on-complete', mode: 'deny', summary: 'Cerrar (completed) o borrar una tarea sin que su verificación haya pasado después de su última edición, o con subtareas abiertas' },

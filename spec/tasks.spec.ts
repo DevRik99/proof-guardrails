@@ -5,12 +5,33 @@ import { describe, test } from 'node:test'
 import { activityText, historyText } from '../src/activity.ts'
 import { shellOf } from '../src/facts.ts'
 import { creditTasks, emptyLedger, recordTaskCreated, recordTaskUpdated, sameCheck } from '../src/ledger.ts'
-import { completionFindings, grewFindings, isReadOnlyShell, planFindings, shellWriteTargets, splitFindings, workPaths } from '../src/rules/tasks.ts'
-import { decisiveChecks, recordEdit } from '../src/ledger.ts'
+import { completionFindings, grewFindings, isReadOnlyShell, leafLedgersFor, ownsMatch, planFindings, shellWriteTargets, splitFindings, workPaths } from '../src/rules/tasks.ts'
+import { checkRedirects, decisiveChecks, ranNoTests, recordEdit } from '../src/ledger.ts'
 import { addedLines, newComments } from '../src/rules/writes.ts'
 import { leafSpecs, parsePlan, reverifyCommand, rootSpec, scopeOfPlanPath } from '../src/unlazy-plan.ts'
 
 const PLAN = readFileSync(new URL('./fixtures/PLAN.md', import.meta.url), 'utf8')
+
+describe('leaf gates before leaf work (csvkit wrote code before its gates)', () => {
+  test('owns globs: **, *, plain files', () => {
+    assert.ok(ownsMatch('src/checkout/**', 'src/checkout/a/b.ts'))
+    assert.ok(ownsMatch('src/**/x.ts', 'src/x.ts'))
+    assert.ok(ownsMatch('src/**/x.ts', 'src/a/b/x.ts'))
+    assert.ok(!ownsMatch('src/**/x.ts', 'src/ax.ts'))
+    assert.ok(ownsMatch('src/*.ts', 'src/parse.ts'))
+    assert.ok(!ownsMatch('src/*.ts', 'src/a/parse.ts'))
+    assert.ok(ownsMatch('src/parse.ts', './src/parse.ts'))
+    assert.ok(!ownsMatch('src/parse.ts', 'src/parseXts'))
+  })
+  test('a write to a file an open unlazy leaf owns needs that leaf ledger', () => {
+    let ledger = recordTaskCreated(emptyLedger(0), '2', '1.1 parse', { parent: '1', size: 'small', unlazy: 'csvkit', leaf: '1.1', owns: ['src/parse.ts', 'src/parse.test.ts'] })
+    ledger = recordTaskCreated(ledger, '3', '1.2 serialize', { parent: '1', size: 'small', unlazy: 'csvkit', leaf: '1.2', owns: ['src/serialize.ts'] })
+    assert.deepEqual(leafLedgersFor(ledger, '/repo', ['/repo/src/parse.ts']).map(item => item.ledger), ['.unlazy/csvkit/gates/leaf-1.1.md'])
+    assert.deepEqual(leafLedgersFor(ledger, '/repo', ['src/index.ts']), [])
+    assert.deepEqual(leafLedgersFor(ledger, '/repo', ['.unlazy/csvkit/gates/leaf-1.1.md']), [])
+    assert.deepEqual(leafLedgersFor(recordTaskUpdated(ledger, '2', 'completed', undefined), '/repo', ['src/parse.ts']), [])
+  })
+})
 
 describe('a check counts only when its exit code is the command exit code', () => {
   test('alone, redirected or followed only by && it decides the result', () => {
@@ -22,6 +43,20 @@ describe('a check counts only when its exit code is the command exit code', () =
     for (const command of ['npm test 2>&1 | tail -30', 'npm test >/dev/null 2>&1; echo "exit=$?"', 'npm test || true', 'npm test && echo ok | tee out.txt']) {
       assert.deepEqual(decisiveChecks(command, 'posix'), [], command)
     }
+  })
+  test('a run that found no tests is not proof (seen in validation: "# tests 0")', () => {
+    const live = '> g@1.0.0 test\n> node --test\n\nTAP version 13\n1..0\n# tests 0\n# suites 0\n# pass 0\n# fail 0\n'
+    assert.ok(ranNoTests(live))
+    for (const output of ['ℹ tests 0\nℹ pass 0', '  0 passing (2ms)', 'No tests found, exiting with code 0', 'No test files found, exiting with code 1', '===== collected 0 items =====', 'ok  \tpkg/x\t[no test files]']) {
+      assert.ok(ranNoTests(output), output)
+    }
+    for (const output of ['# tests 21\n# pass 21\n# fail 0', 'ℹ tests 10', '  10 passing (5ms)', 'collected 12 items', 'tsc: no errors']) {
+      assert.ok(!ranNoTests(output), output)
+    }
+  })
+  test('the files a check writes its output to can be read back', () => {
+    assert.deepEqual(checkRedirects('cd x && npm test > out.txt 2>&1', 'posix'), ['out.txt'])
+    assert.deepEqual(checkRedirects('npm test 2>/dev/null', 'posix'), [])
   })
   test('a pending task that declares the check is credited when it passes, without being in_progress', () => {
     let ledger = recordTaskCreated(emptyLedger(0), '1', 'textkit', { size: 'small', verify: 'npm test' })

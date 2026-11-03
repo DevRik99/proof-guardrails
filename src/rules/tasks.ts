@@ -1,6 +1,7 @@
 import type { Ledger, LedgerTask } from '../ledger.ts'
 import { isVerificationCommand } from '../ledger.ts'
 import { commandWords, gitSubcommand, programName } from '../shell.ts'
+import { leafLedger } from '../unlazy-plan.ts'
 import type { Finding, ShellFacts } from './types.ts'
 
 // Port of require-task-split. Native tasks track the parts; unlazy is how the parts are cut
@@ -159,6 +160,43 @@ export function planFindings(ledger: Ledger, cwd: string, paths: readonly string
       (options.via === 'any'
         ? '\n  O a mano: una tarea madre y subtareas con TaskCreate, cada una con metadata { "parent": "<id madre>", "size": "small", "owns": [...], "verify": "<comando>" }.'
         : ''),
+  }]
+}
+
+const ANY_DIRS = '\u0000'
+const ANY = '\u0001'
+
+export function ownsMatch(glob: string, path: string): boolean {
+  const pattern = glob
+    .trim()
+    .replace(/^\.\//, '')
+    .replace(/\*\*\//g, ANY_DIRS)
+    .replace(/\*\*/g, ANY)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replaceAll(ANY_DIRS, '(?:.*/)?')
+    .replaceAll(ANY, '.*')
+  return new RegExp(`^${pattern}$`).test(path.replace(/^\.\//, ''))
+}
+
+// unlazy writes a leaf's gates before its work; a plan alone let corrida csvkit write code first.
+export function leafLedgersFor(ledger: Ledger, cwd: string, paths: readonly string[]): { leaf: LedgerTask; ledger: string }[] {
+  const written = workPaths(cwd, paths)
+  if (written.length === 0) return []
+  const leaves = ledger.tasks.filter(task => task.status !== 'completed' && task.unlazy !== undefined && task.leaf !== undefined && (task.owns ?? []).length > 0)
+  return leaves
+    .filter(leaf => written.some(path => (leaf.owns ?? []).some(glob => ownsMatch(glob, path))))
+    .map(leaf => ({ leaf, ledger: leafLedger(leaf.unlazy!, leaf.leaf!) }))
+}
+
+export function leafGatesFinding(missing: readonly { leaf: LedgerTask; ledger: string }[]): Finding[] {
+  if (missing.length === 0) return []
+  return [{
+    rule: 'tasks.leaf-gates-first',
+    message:
+      `Escribe primero los gates de la hoja: ${missing.map(item => `#${item.leaf.id} ${item.leaf.subject} → \`${item.ledger}\``).join('; ')}. ` +
+      'unlazy fija qué prueba cada hoja antes de implementarla (plantilla `templates/gates-leaf.md` de la skill `proof-guardrails:unlazy`).',
   }]
 }
 

@@ -8,14 +8,14 @@ import { DISCIPLINE } from '../src/discipline.ts'
 import { findingsFor, judge, render, type Context, type Judged, type Verdict } from '../src/evaluate.ts'
 import { shellOf, textOf, writeIntentOf } from '../src/facts.ts'
 import {
-  creditTasks, decisiveChecks, emptyLedger, isVerificationCommand, openTasks, recordDecision, recordEdit, recordResearch,
+  creditTasks, decisiveChecks, emptyLedger, isVerificationCommand, openTasks, ranNoTests, recordDecision, recordEdit, recordResearch,
   recordTaskCreated, recordTaskUpdated, recordVerification, startWindow, unlazyGates, unverifiedEdits,
   type Ledger, type LedgerGate,
 } from '../src/ledger.ts'
 import { isNativeRule, withNative } from '../src/native.ts'
 import { stripAttribution } from '../src/rules/attribution.ts'
-import { shellWriteTargets, workPaths } from '../src/rules/tasks.ts'
-import type { Finding, ToolFacts, WriteFacts } from '../src/rules/types.ts'
+import { leafGatesFinding, leafLedgersFor, shellWriteTargets, workPaths } from '../src/rules/tasks.ts'
+import type { Finding, ShellFacts, ToolFacts, WriteFacts } from '../src/rules/types.ts'
 import { addedLines, newComments } from '../src/rules/writes.ts'
 import { activityText, historyText, outcome, projectName, targetOf } from '../src/activity.ts'
 import { leafSpecs, parsePlan, rootKey, rootSpec, scopeOfPlanPath, type TaskSpec } from '../src/unlazy-plan.ts'
@@ -149,6 +149,12 @@ async function assess(engine: $, tool: string, input: Input, agentId: string | u
   const facts: ToolFacts = { tool, input, cwd, agentId, shell: shellOf(tool, input), write }
   const context: Context = { config, ledger, declared, now: Date.now() }
   const findings = findingsFor(facts, context)
+  if (modeOf(config, 'tasks.leaf-gates-first') !== 'off') {
+    const written = write !== undefined ? [write.path] : facts.shell !== undefined ? shellWriteTargets(facts.shell) : []
+    const required = leafLedgersFor(ledger, cwd, written)
+    const present = await Promise.all(required.map(item => engine.fs.exists(`${cwd.replace(/[\\/]+$/, '')}/${item.ledger}`).catch(() => false)))
+    findings.push(...leafGatesFinding(required.filter((_, index) => !present[index])))
+  }
   if (write !== undefined && modeOf(config, 'write.narrating-comments') !== 'off') {
     findings.push(...(await narratingComments(engine, write)))
   }
@@ -166,15 +172,28 @@ async function note(engine: $, items: readonly Judged[], effect: string): Promis
 const RESEARCH_TOOL = /^(WebSearch|WebFetch)$|context7|engram__mem_search|__(search|fetch|web_search|web_fetch|get_library_docs|resolve_library_id|query_docs)$/i
 const NPM_LOOKUP = /\b(npm|pnpm|yarn|bun)\s+(view|info|show|docs|repo|home)\b/
 
-async function observe(engine: $, tool: string, input: Input, ran: { deny?: string; isError?: boolean; result?: unknown; text?: string }): Promise<void> {
-  if (ran.deny !== undefined) return
+async function checkOutput(engine: $, shell: ShellFacts, ranText: string): Promise<string> {
+  const files = shellWriteTargets(shell).filter(target => !/^~|\$|`/.test(target)).slice(0, 3)
+  const contents = await Promise.all(files.map(file => engine.fs.read(file).then(text => text.slice(-200_000)).catch(() => '')))
+  return [ranText, ...contents].join('\n')
+}
+
+async function observe(
+  engine: $,
+  tool: string,
+  input: Input,
+  ran: { deny?: string; isError?: boolean; result?: unknown; text?: string },
+): Promise<{ noTests: boolean }> {
+  if (ran.deny !== undefined) return { noTests: false }
   const ok = ran.isError !== true
   const now = Date.now()
   const shell = shellOf(tool, input)
   const intent = writeIntentOf(tool, input)
   const cwd = await engine.session.cwd().catch(() => '.')
   const shellWrites = ok && shell !== undefined ? workPaths(cwd, shellWriteTargets(shell)) : []
-  const decisive = ok && shell !== undefined ? decisiveChecks(shell.command, shell.dialect).join(' && ') : ''
+  let decisive = ok && shell !== undefined ? decisiveChecks(shell.command, shell.dialect).join(' && ') : ''
+  const noTests = decisive !== '' && shell !== undefined && ranNoTests(await checkOutput(engine, shell, ran.text ?? ''))
+  if (noTests) decisive = ''
   const after = await update(engine, ledgerAtom, ledger => {
     let next = ledger
     if (ok && intent !== undefined) next = recordEdit(next, intent.path, now)
@@ -209,6 +228,7 @@ async function observe(engine: $, tool: string, input: Input, ran: { deny?: stri
   })
   const touchedTasks = /^Task(Create|Update)$/.test(tool) || decisive !== '' || intent !== undefined || shellWrites.length > 0
   if (ok && touchedTasks && (after.tasks.length > 0 || tool === 'TaskUpdate')) await saveTasks(engine, after.tasks).catch(() => undefined)
+  return { noTests }
 }
 
 // $.state does not outlive the process: a container restart that resumes the session starts
@@ -498,7 +518,7 @@ export const register: Register = on => {
     try {
       const decision = await decideBeforeRunning($, e.tool_use_id, verdict)
       const ran = decision.deny !== undefined ? { deny: decision.deny } : await next(call)
-      await observe($, e.tool, call as unknown as Input, ran as never)
+      const observed = await observe($, e.tool, call as unknown as Input, ran as never)
       const cwd = await $.session.cwd().catch(() => '.')
       const judged = outcome(ran as { deny?: string; isError?: boolean; text?: string }, verdict, rewrittenBy)
       const answer = decision.answer
@@ -518,6 +538,12 @@ export const register: Register = on => {
         if (synced !== undefined) notes.push(synced)
       }
       const ranOk = ran.deny === undefined && (ran as { isError?: boolean }).isError !== true
+      if (observed.noTests) {
+        notes.push(
+          '[gates:completion.verify-after-edit] Esta verificación no corrió ningún test (el runner no encontró ninguno), así que no cuenta como prueba. ' +
+            'Revisa el patrón o la ruta de los tests y vuelve a correrla.',
+        )
+      }
       if (ranOk && shell !== undefined && isVerificationCommand(shell.command, shell.dialect) && decisiveChecks(shell.command, shell.dialect).length === 0) {
         notes.push(
           '[gates:completion.verify-after-edit] Esta verificación no cuenta como prueba: su exit code no es el del comando ' +

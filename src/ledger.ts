@@ -178,6 +178,29 @@ export function decisiveChecks(command: string, dialect: Dialect): string[] {
     .map(segment => segment.raw)
 }
 
+// A runner that found nothing to run still exits 0 (seen in validation: `npm test` with
+// "# tests 0" closed a task). These are the runners' own "nothing ran" lines.
+const NO_TESTS = [
+  /^#\s*tests\s+0\s*$/m,
+  /^ℹ\s*tests\s+0\s*$/m,
+  /^\s*0 passing\b/m,
+  /\bNo tests? found\b/i,
+  /\bNo test files found\b/i,
+  /\bcollected 0 items\b/,
+  /\[no test files\]/,
+]
+
+export function ranNoTests(output: string): boolean {
+  return NO_TESTS.some(pattern => pattern.test(output))
+}
+
+export function checkRedirects(command: string, dialect: Dialect): string[] {
+  const segments = segmentsOf(command, dialect)
+  return segments
+    .filter(segment => isCheckSegment(commandWords(segment)))
+    .flatMap(segment => segment.redirects.filter(target => !/^\/dev\/|^nul$|^\$null$|^&/i.test(target)))
+}
+
 /** Paths edited after the last successful verification of this window. */
 export function unverifiedEdits(ledger: Ledger): string[] {
   const lastCheck = Math.max(0, ...ledger.verifications.map(item => item.at))
