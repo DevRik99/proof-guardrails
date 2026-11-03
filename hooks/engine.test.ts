@@ -8,11 +8,16 @@ type Overrides = {
   files?: Record<string, string>
   stored?: Record<string, unknown>
   placed?: { isPlaced: true } | { isPlaced: false; reason: string }
+  classify?: (text: string) => string | undefined
 }
 
 // Nothing sits beneath the plugin in a test: each hook here stands for the engine.
 function engine(on: On, overrides: Overrides = {}) {
   const files = overrides.files ?? {}
+  on('model.classify', ($, e) => {
+    if (overrides.classify === undefined) throw new Error('no model in this test')
+    return { value: overrides.classify(String((e as { text?: unknown }).text ?? '')) }
+  })
   on('fs.read', ($, e) => {
     const path = String((e as { path?: unknown }).path ?? '').replaceAll('\\', '/')
     const key = Object.keys(files).find(name => path === name || path.endsWith(`/${name}`))
@@ -302,6 +307,81 @@ describe('attribution, delegation and discipline', () => {
     await $.session.start(START)
     await $.prompt.submit({ text: 'hola' } as never)
     expect(contexts.some(text => /Disciplina de trabajo/.test(text))).toBe(true)
+  })
+})
+
+describe('evasion: a blocked action does not come back in another shape', () => {
+  const answering = (answer: string, extra: (e: Record<string, unknown>) => unknown = () => undefined) => (e: Record<string, unknown>) => {
+    if (e.tool === 'AskUserQuestion') {
+      const questions = (e as { questions: { question: string }[] }).questions
+      return { result: { questions, answers: { [questions[0]!.question]: answer } } }
+    }
+    return extra(e) ?? { result: {} }
+  }
+  test('a script written in the session is judged by its content when it runs', async ($, on) => {
+    engine(on, { files: { 'limpiar.sh': '#!/bin/sh\npkill node\n', 'limpiar.py': 'import os, signal\nos.kill(1, signal.SIGKILL)\n', 'viejo.sh': 'pkill node\n' } })
+    await $.session.start(START)
+    await $.prompt.submit({ text: 'limpia' } as never)
+    await $.tool.call({ tool: 'Write', file_path: '/repo/limpiar.sh', content: '#!/bin/sh\npkill node\n' } as never)
+    await $.tool.call({ tool: 'Write', file_path: '/repo/limpiar.py', content: 'import os, signal\nos.kill(1, signal.SIGKILL)\n' } as never)
+    const shellScript = await $.tool.check({ tool: 'Bash', input: { command: 'bash limpiar.sh' } })
+    expect(shellScript.decision).toBe('ask')
+    expect(shellScript.reason).toMatch(/Dentro de `limpiar\.sh`[\s\S]*Matar procesos/)
+    const pyScript = await $.tool.check({ tool: 'Bash', input: { command: 'python3 limpiar.py' } })
+    expect(pyScript.reason).toMatch(/evasion\.inline-dangerous[\s\S]*limpiar\.py/)
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'bash viejo.sh' } })).decision).toBe('allow')
+  })
+  test('npm run of a script in a package.json edited this session is judged by the script body', async ($, on) => {
+    const pkg = JSON.stringify({ name: 'x', scripts: { clean: 'pkill node && rm -rf ~/cache', build: 'tsc' } })
+    engine(on, { files: { 'package.json': pkg } })
+    await $.session.start(START)
+    await $.prompt.submit({ text: 'limpia' } as never)
+    await $.tool.call({ tool: 'Write', file_path: '/repo/package.json', content: pkg } as never)
+    const clean = await $.tool.check({ tool: 'Bash', input: { command: 'npm run clean' } })
+    expect(clean.reason).toMatch(/script `clean` de package\.json/)
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'npm run build' } })).decision).toBe('allow')
+  })
+  test('a commit message file carrying AI co-authorship is refused', async ($, on) => {
+    engine(on, { files: { 'msg.txt': 'feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n', 'ok.txt': 'feat: y\n' } })
+    const refused = await $.tool.check({ tool: 'Bash', input: { command: 'git commit -F msg.txt' } })
+    expect(refused.decision).toBe('deny')
+    expect(refused.reason).toMatch(/msg\.txt[\s\S]*coautoría/)
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -F ok.txt' } })).decision).toBe('allow')
+  })
+  test('the unlazy root cannot be deleted or closed while a gate is abandoned (pricekit, step 40)', async ($, on) => {
+    const created: Record<string, unknown>[] = []
+    const gates = '# Gates: pagos\n\n- [x] R1: tests\n  EVIDENCE: ok\n\n- [ ] R5: push al remoto\n  EVIDENCE: pending\n\nABANDON: R5 push bloqueado por el hook\n'
+    taskEngine(on, created, { '.unlazy/pagos/PLAN.md': PLAN_TEXT, '.unlazy/pagos/GATES.md': gates })
+    await $.session.start(START)
+    await $.tool.call({ tool: 'Write', file_path: '.unlazy/pagos/PLAN.md', content: PLAN_TEXT })
+    const deleted = await $.tool.check({ tool: 'TaskUpdate', input: { taskId: '1', status: 'deleted' } })
+    expect(deleted.decision).toBe('deny')
+    expect(deleted.reason).toMatch(/abandonados: R5[\s\S]*Borrarla esconde/)
+    expect((await $.tool.check({ tool: 'TaskUpdate', input: { taskId: '1', status: 'completed' } })).reason).toMatch(/Cerrarla esconde/)
+  })
+  test('a refused kill locks its target: another route is stopped until the person speaks again', async ($, on) => {
+    engine(on, { call: answering('No') })
+    await $.session.start(START)
+    await $.prompt.submit({ text: 'reinicia el server' } as never)
+    const first = await $.tool.call({ tool: 'Bash', command: 'pkill vite' } as never)
+    expect(String((first as { deny?: string }).deny)).toMatch(/irreversible\.destructive[\s\S]*Cualquier otra vía/)
+    const around = await $.tool.check({ tool: 'Bash', input: { command: 'kill $(cat vite.pid)' } })
+    expect(around.reason).toMatch(/evasion\.blocked-target[\s\S]*«vite»/)
+    await $.prompt.submit({ text: 'ok, mátalo' } as never)
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'kill $(cat vite.pid)' } })).decision).toBe('allow')
+  })
+  test('after a block, an independent model reviews the next commands; before any block it is not asked', async ($, on) => {
+    let asked = 0
+    engine(on, { call: answering('No'), classify: () => (asked++, 'rodea') })
+    await $.session.start(START)
+    await $.prompt.submit({ text: 'deploy' } as never)
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'systemctl --user restart web' } })).decision).toBe('allow')
+    expect(asked).toBe(0)
+    await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+    const next = await $.tool.check({ tool: 'Bash', input: { command: 'rsync -a dist/ server:/var/www/', description: 'copiar build' } })
+    expect(next.reason).toMatch(/evasion\.second-opinion/)
+    expect(asked).toBe(1)
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git status' } })).decision).toBe('allow')
   })
 })
 

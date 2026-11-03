@@ -149,6 +149,20 @@ export function segmentsOf(command: string, dialect: Dialect): Segment[] {
   return segments
 }
 
+// Limitation: only NAME=value segments of the same command are followed; a value that
+// itself holds $(…) is substituted as written, never executed.
+export function expandAssignments(segments: readonly Segment[]): Segment[] {
+  const vars = new Map<string, string>()
+  const substitute = (text: string) => text.replace(/\$\{(\w+)\}|\$(\w+)/g, (whole, braced, bare) => vars.get(braced ?? bare) ?? whole)
+  return segments.map(segment => {
+    const words = segment.words.map(substitute)
+    if (words.length > 0 && words.every(word => /^[A-Za-z_]\w*=/.test(word))) {
+      for (const word of words) vars.set(word.slice(0, word.indexOf('=')), word.slice(word.indexOf('=') + 1))
+    }
+    return { ...segment, words, raw: substitute(segment.raw) }
+  })
+}
+
 /** The words with leading env assignments and wrapper commands removed. */
 export function commandWords(segment: Segment): string[] {
   const words = [...segment.words]

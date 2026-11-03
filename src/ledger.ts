@@ -1,5 +1,5 @@
-import type { Ledger, LedgerTask } from '../types/index.d.ts'
-import { commandWords, programName, segmentsOf, type Dialect, type Segment } from './shell.ts'
+import type { BlockedTarget, Ledger, LedgerTask } from '../types/index.d.ts'
+import { commandWords, expandAssignments, programName, segmentsOf, type Dialect, type Segment } from './shell.ts'
 
 // What the session actually did, as the mod observed it from real tool calls and results.
 // Completion rules read this instead of trusting what the model writes about its own work.
@@ -114,6 +114,7 @@ export function emptyLedger(now: number): Ledger {
     stopBlocks: 0,
     decisions: [],
     tasks: [],
+    blockedTargets: [],
   }
 }
 
@@ -122,7 +123,14 @@ function cap<T>(list: T[], size: number): T[] {
 }
 
 export function startWindow(ledger: Ledger, now: number): Ledger {
-  return { ...ledger, windowStart: now, edits: [], verifications: [], stopBlocks: 0 }
+  return { ...ledger, windowStart: now, edits: [], verifications: [], stopBlocks: 0, blockedTargets: [] }
+}
+
+export function recordBlockedTargets(ledger: Ledger, targets: readonly BlockedTarget[]): Ledger {
+  if (targets.length === 0) return ledger
+  const known = new Set((ledger.blockedTargets ?? []).map(item => `${item.kind}:${item.target}`))
+  const fresh = targets.filter(item => !known.has(`${item.kind}:${item.target}`))
+  return { ...ledger, blockedTargets: cap([...(ledger.blockedTargets ?? []), ...fresh], 50) }
 }
 
 export function recordEdit(ledger: Ledger, path: string, now: number): Ledger {
@@ -175,18 +183,8 @@ function isCheckSegment(words: readonly string[]): boolean {
   return false
 }
 
-// Limitation: only NAME=value segments of the same command are followed; a value that
-// itself holds $(…) is substituted as written, never executed.
 function expandedSegments(command: string, dialect: Dialect): Segment[] {
-  const vars = new Map<string, string>()
-  const substitute = (text: string) => text.replace(/\$\{(\w+)\}|\$(\w+)/g, (whole, braced, bare) => vars.get(braced ?? bare) ?? whole)
-  return segmentsOf(command, dialect).map(segment => {
-    const words = segment.words.map(substitute)
-    if (words.length > 0 && words.every(word => /^[A-Za-z_]\w*=/.test(word))) {
-      for (const word of words) vars.set(word.slice(0, word.indexOf('=')), word.slice(word.indexOf('=') + 1))
-    }
-    return { ...segment, words, raw: substitute(segment.raw) }
-  })
+  return expandAssignments(segmentsOf(command, dialect))
 }
 
 export function isVerificationCommand(command: string, dialect: Dialect): boolean {

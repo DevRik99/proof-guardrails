@@ -6,7 +6,7 @@ import { EMPTY_CONFIG } from '../src/config.ts'
 import { findingsFor, judge, type Context } from '../src/evaluate.ts'
 import { shellOf, writeIntentOf } from '../src/facts.ts'
 import { emptyLedger, isVerificationCommand, unlazyGates, unverifiedEdits, recordEdit, recordVerification } from '../src/ledger.ts'
-import { stripAttribution } from '../src/rules/attribution.ts'
+import { commitMessageFiles, hasAttributionTrailer, stripAttribution } from '../src/rules/attribution.ts'
 import { riskyDeleteTarget } from '../src/rules/irreversible.ts'
 import { addedLines } from '../src/rules/writes.ts'
 import type { ToolFacts } from '../src/rules/types.ts'
@@ -82,6 +82,28 @@ describe('irreversible', () => {
     assert.ok(shellRules('taskkill /F /IM node.exe').includes('irreversible.destructive'))
     assert.ok(shellRules('Stop-Process -Name chrome', 'PowerShell').includes('irreversible.destructive'))
   })
+  test('kill by name without saying "by name": lookups, pipes, -1, fuser', () => {
+    for (const command of [
+      'kill -9 $(pgrep node)',
+      'kill `pidof vite`',
+      'kill -9 $(lsof -t -i:3000)',
+      'pgrep -f vite | xargs kill -9',
+      'pidof node | xargs -r sudo kill',
+      'kill -9 -1',
+      'kill -- -1',
+      'fuser -k 3000/tcp',
+      'killall5 -9',
+    ]) {
+      assert.ok(shellRules(command).includes('irreversible.destructive'), command)
+    }
+    for (const command of ['Get-Process node | Stop-Process -Force', 'gps chrome | spps']) {
+      assert.ok(shellRules(command, 'PowerShell').includes('irreversible.destructive'), command)
+    }
+  })
+  test('killing a known PID stays allowed (stopping a server the session started)', () => {
+    assert.deepEqual(shellRules('kill 4821').filter(rule => rule.startsWith('irreversible')), [])
+    assert.deepEqual(shellRules('kill %1').filter(rule => rule.startsWith('irreversible')), [])
+  })
   test('redirect into .env and lockfile edits ask', () => {
     assert.ok(shellRules('echo KEY=1 >> .env').includes('irreversible.protected-path'))
     assert.ok(writeRules('/repo/package-lock.json', '{}', '{"a":1}').includes('irreversible.protected-path'))
@@ -145,6 +167,20 @@ describe('attribution', () => {
       assert.doesNotMatch(out, /Co-Authored-By: Claude|Claude-Session|Generated with/)
       assert.ok(parses(out), out)
     }
+  })
+  test('trailer put back through --trailer (pricekit, step 33) is stripped too', () => {
+    const live = 'git commit -q --amend --no-edit --trailer "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" --trailer "Claude-Session: https://claude.ai/code/session_x"'
+    const out = stripAttribution(live, 'posix')
+    assert.equal(out, 'git commit -q --amend --no-edit')
+    assert.ok(parses(out!))
+    assert.equal(stripAttribution("git commit --amend --trailer='Co-authored-by=Claude <noreply@anthropic.com>' -m x", 'posix'), 'git commit --amend -m x')
+    assert.equal(stripAttribution('git interpret-trailers --trailer "Co-authored-by: Claude" --in-place msg.txt', 'posix'), 'git interpret-trailers --in-place msg.txt')
+    assert.equal(stripAttribution('git commit --trailer "Reviewed-by: Ana <ana@x.com>" -m x', 'posix'), undefined)
+  })
+  test('commit message files and trailers inside them are found', () => {
+    assert.deepEqual(commitMessageFiles('git commit -F msg.txt && git commit --file=other.txt', 'posix'), ['msg.txt', 'other.txt'])
+    assert.ok(hasAttributionTrailer('feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n'))
+    assert.ok(!hasAttributionTrailer('feat: x\n\nCo-Authored-By: Ana <ana@x.com>\n'))
   })
   test('leaves a human co-author alone', () => {
     assert.equal(stripAttribution('git commit -m "x\n\nCo-Authored-By: Ana <ana@x.com>"', 'posix'), undefined)

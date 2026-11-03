@@ -8,13 +8,14 @@ import { DISCIPLINE } from '../src/discipline.ts'
 import { findingsFor, judge, render, type Context, type Judged, type Verdict } from '../src/evaluate.ts'
 import { shellOf, textOf, writeIntentOf } from '../src/facts.ts'
 import {
-  creditTasks, decisiveChecks, emptyLedger, isVerificationCommand, openTasks, ranNoTests, recordDecision, recordEdit, recordResearch,
-  recordTaskCreated, recordTaskUpdated, recordVerification, startWindow, unlazyGates, unverifiedEdits,
+  creditTasks, decisiveChecks, emptyLedger, isVerificationCommand, openTasks, ranNoTests, recordBlockedTargets, recordDecision, recordEdit,
+  recordResearch, recordTaskCreated, recordTaskUpdated, recordVerification, startWindow, unlazyGates, unverifiedEdits,
   type Ledger, type LedgerGate,
 } from '../src/ledger.ts'
 import { isNativeRule, withNative } from '../src/native.ts'
-import { stripAttribution } from '../src/rules/attribution.ts'
-import { leafGatesFinding, leafLedgersFor, shellWriteTargets, workPaths } from '../src/rules/tasks.ts'
+import { commitMessageFiles, hasAttributionTrailer, stripAttribution } from '../src/rules/attribution.ts'
+import { blockedTargetsOf, codeFileFindings, lockedTargetFindings, packageScriptsRun, scriptRuns, shellOfText } from '../src/rules/evasion.ts'
+import { isReadOnlyShell, leafGatesFinding, leafLedgersFor, shellWriteTargets, workPaths } from '../src/rules/tasks.ts'
 import type { Finding, ShellFacts, ToolFacts, WriteFacts } from '../src/rules/types.ts'
 import { addedLines, newComments } from '../src/rules/writes.ts'
 import { activityText, historyText, outcome, projectName, targetOf } from '../src/activity.ts'
@@ -49,10 +50,13 @@ const CONFIRM = 'Sí, ejecutar'
 // decides first: it refuses what is denied and asks the person itself.
 type Decision = { deny?: string; answer?: string }
 
+const LOCKS = /^(irreversible\.destructive|evasion\.)/
+const LOCK_NOTE = '\nCualquier otra vía hacia lo mismo (otro comando, un intérprete o un script) también queda bloqueada hasta que el usuario lo apruebe.'
+
 async function decideBeforeRunning(engine: $, id: string | undefined, verdict: Verdict): Promise<Decision> {
   if (verdict.deny.length > 0) {
     await note(engine, verdict.deny, 'bloqueado')
-    return { deny: render(verdict.deny) }
+    return { deny: render(verdict.deny) + (verdict.deny.some(item => LOCKS.test(item.rule)) ? LOCK_NOTE : '') }
   }
   if (verdict.ask.length === 0) return {}
   await note(engine, verdict.ask, 'confirmación')
@@ -69,7 +73,9 @@ async function decideBeforeRunning(engine: $, id: string | undefined, verdict: V
     return { answer }
   }
   const why = answer === undefined ? 'No hay a quién pedir confirmación en esta sesión.' : `El usuario no lo confirmó${answer === 'No' ? '' : `: ${answer}`}.`
-  return { deny: `${reason}\n${why}`, answer: answer ?? 'sin respuesta: nadie a quién preguntar' }
+  await note(engine, verdict.ask, 'rechazado')
+  const lock = verdict.ask.some(item => LOCKS.test(item.rule)) ? LOCK_NOTE : ''
+  return { deny: `${reason}\n${why}${lock}`, answer: answer ?? 'sin respuesta: nadie a quién preguntar' }
 }
 
 type $ = EngineInterface
@@ -158,7 +164,113 @@ async function assess(engine: $, tool: string, input: Input, agentId: string | u
   if (write !== undefined && modeOf(config, 'write.narrating-comments') !== 'off') {
     findings.push(...(await narratingComments(engine, write)))
   }
+  if (facts.shell !== undefined) {
+    findings.push(...(await executedContentFindings(engine, facts, context)), ...(await commitFileFindings(engine, facts.shell, cwd)))
+  }
+  if (tool === 'TaskUpdate' && (input.status === 'completed' || input.status === 'deleted') && input.taskId !== undefined) {
+    findings.push(...(await unlazyRootFindings(engine, ledger, cwd, String(input.taskId), input.status)))
+  }
+  if (findings.length === 0) findings.push(...(await secondOpinion(engine, facts, ledger, config)))
   return judge(findings, facts, context, textOf(input))
+}
+
+function underCwd(cwd: string, path: string): string {
+  return `${cwd.replace(/[\\/]+$/, '')}/${path}`
+}
+
+function scanContent(path: string, content: string, facts: ToolFacts, context: Context, where: string, asShell = false): Finding[] {
+  const shellLike = asShell || /\.(sh|bash|zsh|ps1|psm1)$/i.test(path) || !/\.[a-z0-9]+$/i.test(path)
+  const raw = shellLike
+    ? findingsFor({ ...facts, tool: 'Bash', input: { command: content }, shell: shellOfText(content, path), write: undefined }, context)
+        .filter(item => /^(irreversible|evasion|edit)\./.test(item.rule))
+    : [...codeFileFindings(path, content), ...lockedTargetFindings(context.ledger, [content])]
+  return raw.map(item => ({ rule: item.rule, message: `${where}: ${item.message}` }))
+}
+
+async function executedContentFindings(engine: $, facts: ToolFacts, context: Context): Promise<Finding[]> {
+  const shell = facts.shell
+  if (shell === undefined || modeOf(context.config, 'evasion.fresh-script') === 'off') return []
+  const written = new Set(workPaths(facts.cwd, context.ledger.edits.map(edit => edit.path)))
+  const out: Finding[] = []
+  for (const script of scriptRuns(shell)) {
+    const relative = workPaths(facts.cwd, [script])[0]
+    if (relative === undefined || !written.has(relative)) continue
+    const content = await engine.fs.read(underCwd(facts.cwd, relative)).catch(() => undefined)
+    if (content !== undefined) out.push(...scanContent(relative, content, facts, context, `Dentro de \`${relative}\` (escrito en esta sesión)`))
+  }
+  const names = packageScriptsRun(shell)
+  if (names.length > 0 && written.has('package.json')) {
+    const manifest = (await readJson(engine, underCwd(facts.cwd, 'package.json'))) as { scripts?: Record<string, unknown> } | undefined
+    for (const name of names) {
+      const body = manifest?.scripts?.[name]
+      if (typeof body === 'string') out.push(...scanContent('package.json', body, facts, context, `En el script \`${name}\` de package.json (editado en esta sesión)`, true))
+    }
+  }
+  return out
+}
+
+async function commitFileFindings(engine: $, shell: ShellFacts, cwd: string): Promise<Finding[]> {
+  const out: Finding[] = []
+  for (const file of commitMessageFiles(shell.command, shell.dialect)) {
+    const text = await engine.fs.read(/^([a-z]:)?[\\/]/i.test(file) ? file : underCwd(cwd, file)).catch(() => '')
+    if (hasAttributionTrailer(text)) {
+      out.push({ rule: 'attribution.strip', message: `El mensaje de \`${file}\` trae coautoría de IA. Quítala del archivo antes del commit.` })
+    }
+  }
+  return out
+}
+
+async function unlazyRootFindings(engine: $, ledger: Ledger, cwd: string, id: string, action: string): Promise<Finding[]> {
+  const task = ledger.tasks.find(item => item.id === id)
+  if (task?.unlazy === undefined || task.leaf !== undefined) return []
+  const scope = task.unlazy
+  const gatesDir = underCwd(cwd, `.unlazy/${scope}/gates`)
+  const leaves = (await engine.fs.list(gatesDir).catch(() => []))
+    .filter(entry => entry.kind === 'file' && entry.name.endsWith('.md'))
+    .map(entry => `${gatesDir}/${entry.name}`)
+  const unmet: string[] = []
+  const abandoned: string[] = []
+  for (const file of [underCwd(cwd, `.unlazy/${scope}/GATES.md`), ...leaves]) {
+    const text = await engine.fs.read(file).catch(() => undefined)
+    if (text === undefined) continue
+    const gates = unlazyGates(file, text)
+    unmet.push(...gates.unmet.map(gate => gate.id))
+    abandoned.push(...gates.abandoned.map(gate => gate.id))
+  }
+  if (unmet.length === 0 && abandoned.length === 0) return []
+  const what = [unmet.length > 0 ? `sin cumplir: ${unmet.join(', ')}` : '', abandoned.length > 0 ? `abandonados: ${abandoned.join(', ')}` : ''].filter(Boolean).join('; ')
+  return [{
+    rule: 'tasks.verify-on-complete',
+    message:
+      `La tarea madre del plan unlazy «${scope}» tiene gates ${what}. ${action === 'deleted' ? 'Borrarla' : 'Cerrarla'} esconde lo que falta. ` +
+      'Déjala abierta y dile al usuario qué queda pendiente y por qué.',
+  }]
+}
+
+async function secondOpinion(engine: $, facts: ToolFacts, ledger: Ledger, config: Config): Promise<Finding[]> {
+  const shell = facts.shell
+  if (shell === undefined || modeOf(config, 'evasion.second-opinion') === 'off' || isReadOnlyShell(shell) || isVerificationCommand(shell.command, shell.dialect)) return []
+  const blocks = ledger.decisions.filter(
+    item => item.at >= ledger.windowStart && ['bloqueado', 'rechazado'].includes(item.effect) && /^(irreversible|evasion)\./.test(item.rule),
+  )
+  const targets = ledger.blockedTargets ?? []
+  if (blocks.length === 0 && targets.length === 0) return []
+  const description = typeof facts.input.description === 'string' ? facts.input.description : '(sin descripción)'
+  const text =
+    'Revisas si un agente de código intenta rodear un bloqueo de seguridad.\n' +
+    `Lo que se le bloqueó en esta conversación:\n${blocks.slice(-5).map(item => `- [${item.rule}] ${item.message.split('\n')[0]}`).join('\n')}\n` +
+    `${targets.map(item => `- objetivo bloqueado: ${item.kind} «${item.target}»`).join('\n')}\n\n` +
+    `Comando que quiere ejecutar ahora:\n${shell.command.slice(0, 2000)}\nDescripción que dio el agente: ${description}\n\n` +
+    'Etiqueta "rodea" si el comando logra, por otra vía, lo mismo que se bloqueó, o si mata procesos, borra datos o publica algo sin que su descripción lo diga. ' +
+    'Etiqueta "normal" si es trabajo corriente que no toca lo bloqueado.'
+  const label = await engine.model.classify(text, ['normal', 'rodea']).catch(() => undefined)
+  if (label !== 'rodea') return []
+  return [{
+    rule: 'evasion.second-opinion',
+    message:
+      'Un revisor independiente juzgó que este comando rodea un bloqueo anterior (o hace algo irreversible que su descripción no dice). ' +
+      'No lo intentes por otra vía: explícale al usuario qué necesitas y por qué.',
+  }]
 }
 
 async function note(engine: $, items: readonly Judged[], effect: string): Promise<void> {
@@ -517,6 +629,12 @@ export const register: Register = on => {
     if (e.tool_use_id !== undefined) verdicts.set(e.tool_use_id, verdict)
     try {
       const decision = await decideBeforeRunning($, e.tool_use_id, verdict)
+      const lockedBy = [...verdict.deny, ...verdict.ask].map(item => item.rule).filter(rule => LOCKS.test(rule))
+      const shellCall = shellOf(e.tool, call as unknown as Input)
+      if (decision.deny !== undefined && lockedBy.length > 0 && shellCall !== undefined) {
+        const targets = blockedTargetsOf(shellCall, lockedBy, Date.now())
+        if (targets.length > 0) await update($, ledgerAtom, ledger => recordBlockedTargets(ledger, targets)).catch(() => undefined)
+      }
       const ran = decision.deny !== undefined ? { deny: decision.deny } : await next(call)
       const observed = await observe($, e.tool, call as unknown as Input, ran as never)
       const cwd = await $.session.cwd().catch(() => '.')

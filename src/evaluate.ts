@@ -4,6 +4,7 @@ import { modeOf, paramOf, type Config } from './config.ts'
 import type { Ledger } from './ledger.ts'
 import { promptOrdersAttribution } from './rules/attribution.ts'
 import { briefFindings } from './rules/delegation.ts'
+import { inlineDangerFindings, lockedTargetFindings, opaqueFindings } from './rules/evasion.ts'
 import { shellIrreversible, writeIrreversible } from './rules/irreversible.ts'
 import { forgeFlow, repeatedQuestions, userRuleFindings } from './rules/misc.ts'
 import { importedPackages, installedPackages, unknownPackages } from './rules/research.ts'
@@ -51,6 +52,7 @@ export function findingsFor(facts: ToolFacts, context: Context): (Finding & { mo
   if (shell !== undefined) {
     out.push(...shellIrreversible(shell, facts.cwd, { regenerable, extraPaths }), ...windowsShell(shell), ...inlineScripts(shell))
     out.push(...unknownPackages(installedPackages(shell), context.declared ?? new Set(), context.ledger.research, allow))
+    out.push(...opaqueFindings(shell), ...inlineDangerFindings(shell), ...lockedTargetFindings(context.ledger, [shell.command]))
   }
   if (write !== undefined) {
     out.push(...writeIrreversible(write, extraPaths), ...lintSuppression(write), ...neutralSpanish(write), ...timingChange(write))

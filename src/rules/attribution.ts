@@ -11,11 +11,37 @@ const TRAILER_TEXT = new RegExp(
   'i',
 )
 const SEPARATE_FLAG = /\s+-m\s+(["'])\s*(co-authored-by:[^"'\n]*|claude-session:[^"'\n]*|🤖?\s*generated with[^"'\n]*)\1/gi
+const TRAILER_FLAG = /\s+--trailer(?:=|\s+)(?:"([^"\n]*)"|'([^'\n]*)'|(\S+))/gi
 
 export function isGitCommit(command: string, dialect: Dialect): boolean {
   return segmentsOf(command, dialect).some(segment => {
     const words = commandWords(segment)
-    return programName(words[0]) === 'git' && gitSubcommand(words).name === 'commit'
+    return programName(words[0]) === 'git' && ['commit', 'interpret-trailers'].includes(gitSubcommand(words).name)
+  })
+}
+
+export function commitMessageFiles(command: string, dialect: Dialect): string[] {
+  const out: string[] = []
+  for (const segment of segmentsOf(command, dialect)) {
+    const words = commandWords(segment)
+    if (programName(words[0]) !== 'git' || gitSubcommand(words).name !== 'commit') continue
+    const { args } = gitSubcommand(words)
+    args.forEach((arg, index) => {
+      if ((arg === '-F' || arg === '--file') && args[index + 1] !== undefined && args[index + 1] !== '-') out.push(args[index + 1]!)
+      if (arg.startsWith('--file=')) out.push(arg.slice('--file='.length))
+    })
+  }
+  return out
+}
+
+export function hasAttributionTrailer(text: string): boolean {
+  return text.split('\n').some(line => isTrailer(line))
+}
+
+function withoutTrailerFlags(command: string): string {
+  return command.replace(TRAILER_FLAG, (whole, double, single, bare) => {
+    const value = String(double ?? single ?? bare ?? '').replace(/^([\w-]+)\s*=\s*/, '$1: ')
+    return isTrailer(value) ? '' : whole
   })
 }
 
@@ -29,7 +55,7 @@ function isTrailer(text: string): boolean {
 export function stripAttribution(command: string, dialect: Dialect): string | undefined {
   if (!isGitCommit(command, dialect)) return undefined
   const kept: string[] = []
-  for (const line of command.replace(SEPARATE_FLAG, '').split('\n')) {
+  for (const line of withoutTrailerFlags(command.replace(SEPARATE_FLAG, '')).split('\n')) {
     const cut = line.search(/["'`]/)
     const text = cut === -1 ? line : line.slice(0, cut)
     if (!isTrailer(text)) {

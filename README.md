@@ -98,6 +98,14 @@ de la sesión. No hay servidores externos ni telemetría propia.
   funcionan en todas.
 - Las reglas sobre comandos son un análisis léxico, no una frontera de seguridad: para
   aislamiento real de sistema de archivos y red usa el sandbox nativo de Claude Code.
+- Contra rodeos (familia `evasion`) el mod no intenta adivinar cada forma de escribir lo mismo:
+  frena lo que no puede resolver (eval, base64 a un intérprete, texto canalizado a un shell,
+  programa en una variable), mira la capacidad del código (`os.kill`, `rmtree`, `subprocess`…),
+  analiza el contenido de los scripts escritos en la sesión antes de ejecutarlos, y tras un
+  bloqueo mantiene bloqueado el mismo objetivo por cualquier vía hasta tu próximo mensaje. Un
+  modelo aparte revisa los comandos siguientes. Aun así, un rodeo que el mod no reconozca puede
+  pasar: el corpus de `spec/corpus.spec.ts` dice qué está cubierto, y cada rodeo nuevo que
+  aparezca se agrega ahí.
 
 ## Desarrollo
 

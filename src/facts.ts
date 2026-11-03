@@ -1,4 +1,4 @@
-import { dialectFor, segmentsOf } from './shell.ts'
+import { dialectFor, expandAssignments, segmentsOf } from './shell.ts'
 import type { ShellFacts } from './rules/types.ts'
 
 type Input = Readonly<Record<string, unknown>>
@@ -13,7 +13,7 @@ export function shellOf(tool: string, input: Input): ShellFacts | undefined {
   if (command === undefined || command.trim() === '') return undefined
   if (/^(Write|Edit|MultiEdit|NotebookEdit|Read|Glob|Grep|Agent|Task)$/.test(tool)) return undefined
   const dialect = dialectFor(tool, command)
-  return { command, dialect, segments: segmentsOf(command, dialect) }
+  return { command, dialect, segments: expandAssignments(segmentsOf(command, dialect)) }
 }
 
 export type WriteIntent = {

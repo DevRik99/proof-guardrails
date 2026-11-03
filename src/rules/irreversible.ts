@@ -198,8 +198,22 @@ function segmentFindings(segment: Segment, cwd: string, dialect: ShellFacts['dia
   return out
 }
 
+// Killing by name rarely says "by name": the PIDs come from pgrep/pidof/Get-Process through a
+// pipe or $(…), and -1 means every process the user owns. These need the whole command.
+const KILL_BY_LOOKUP = [
+  /\bkill\b[^|;&\n]*(\$\(|`)\s*(pgrep|pidof|lsof\s+-t)\b/,
+  /\b(pgrep|pidof|lsof\s+-t)\b[^\n;&]*\|\s*(sudo\s+)?xargs\s+(-\S+\s+)*(sudo\s+)?kill\b/,
+  /\b(get-process|gps|ps)\b[^\n;&]*\|\s*(stop-process|spps|kill)\b/i,
+  /\bkill\s+(-\S+\s+)*(--\s+)?-1\b/,
+  /\bfuser\s+(-\S+\s+)*-[a-z]*k/,
+  /\bkillall5\b/,
+]
+
 export function shellIrreversible(shell: ShellFacts, cwd: string, options: IrreversibleOptions = DEFAULT_OPTIONS): Finding[] {
   const out = shell.segments.flatMap(segment => segmentFindings(segment, cwd, shell.dialect, options))
+  if (!out.some(item => item.message.startsWith('Matar procesos')) && KILL_BY_LOOKUP.some(pattern => pattern.test(shell.command))) {
+    out.push(finding('irreversible.destructive', 'Matar procesos por nombre puede cerrar programas ajenos a la tarea (incluido el propio Claude).'))
+  }
   if (/\b(curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b[^\n|]*\|\s*(sudo\s+)?(sh|bash|zsh|iex|invoke-expression)\b/i.test(shell.command)) {
     out.push(finding('irreversible.remote-script', 'Ejecuta un script descargado de internet sin revisarlo.'))
   }

@@ -9,6 +9,14 @@ export type Ledger = {
   stopBlocks: number
   decisions: { rule: string; effect: string; message: string; at: number }[]
   tasks: LedgerTask[]
+  blockedTargets?: BlockedTarget[]
+}
+
+export type BlockedTarget = {
+  kind: 'kill' | 'delete' | 'publish'
+  target: string
+  rule: string
+  at: number
 }
 
 export type LedgerTask = {

@@ -1,6 +1,6 @@
 {
   "name": "proof-guardrails",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Guardrails deterministas para Claude: confirma lo irreversible, no deja dar por terminado sin evidencia, parte el trabajo con unlazy y muestra con qué choca cada acción.",
   "author": { "name": "Devrik", "url": "https://github.com/DevRik99" },
   "homepage": "https://github.com/DevRik99/proof-guardrails",
