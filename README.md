@@ -52,7 +52,7 @@ y el proyecto gana. Un valor con tipo equivocado cae al default y nunca rompe la
 
 Al iniciar sesión en la raíz de un repositorio git (no en tu carpeta de usuario ni en temporales),
 el mod escribe o completa `.ai/gates.json` con **cada regla y cada agente**, con su `descripcion`
-de qué hace y el modo y los parámetros en vigor en esa sesión (proyecto > global > default). Lo que
+de qué hace, sus `opciones` (qué hace cada modo en esa regla y qué acepta cada parámetro) y el modo y los parámetros en vigor en esa sesión (proyecto > global > default). Lo que
 ya editaste se conserva; solo se agregan reglas o agentes que falten y se refresca `descripcion`.
 Si el archivo no es JSON válido no se toca. Para apagar o cambiar algo, edita `mode` ahí.
 Como cada regla queda escrita, una clave de familia o `all` solo alcanza a reglas no listadas.
@@ -73,7 +73,7 @@ Como cada regla queda escrita, una clave de familia o `all` solo alcanza a regla
 }
 ```
 
-Precedencia del modo: regla > familia > `all` > default. Modos: `off`, `warn`, `ask`, `deny`.
+Precedencia del modo: regla > familia > `all` > default. Modos: `off`, `warn`, `ask`, `deny`. En las reglas de fin de turno (`completion.*`) `ask` retiene igual que `deny`; en los interruptores (`attribution.strip`, `discipline.prompt`, `tasks.from-unlazy`) todo lo que no sea `off` es encendido.
 
 Comandos (los que cambian configuración solo los ejecuta la persona):
 

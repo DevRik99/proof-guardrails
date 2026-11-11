@@ -118,3 +118,17 @@ describe('the project file spells out every setting', () => {
     for (const rule of CATALOG) assert.equal(modeOf(parseConfig(first), rule.id), rule.mode)
   })
 })
+
+describe('every option in the project file says what it does', () => {
+  test('each param of each rule has its help, and no help names a param that does not exist', () => {
+    for (const rule of CATALOG) {
+      assert.deepEqual(Object.keys(rule.paramHelp ?? {}).sort(), Object.keys(rule.params ?? {}).sort(), rule.id)
+    }
+  })
+  test('each rule lists what every mode does for it', () => {
+    const rules = withEverySetting(undefined, parseConfig(undefined)).file.rules as Record<string, { opciones: { mode: Record<string, string> } }>
+    for (const rule of CATALOG) assert.deepEqual(Object.keys(rules[rule.id]!.opciones.mode), ['off', 'warn', 'ask', 'deny'], rule.id)
+    assert.match(rules['completion.open-tasks']!.opciones.mode.ask, /deny/)
+    assert.match(rules['attribution.strip']!.opciones.mode.warn, /Encendida/)
+  })
+})

@@ -1,5 +1,5 @@
 import { ROLES } from './agents.ts'
-import { CATALOG, defaultMode, MODES, RULE_IDS } from './catalog.ts'
+import { CATALOG, defaultMode, MODE_HELP, MODES, RULE_IDS } from './catalog.ts'
 import type { Mode } from './rules/types.ts'
 
 // Same philosophy as claude-gates: every rule is toggled and tuned per project
@@ -139,15 +139,19 @@ export function materialized(): Record<string, RuleSetting> {
 }
 
 const DESCRIPTION = 'descripcion'
+const OPTIONS = 'opciones'
+
+const EFFORT_HELP = 'Esfuerzo: low, medium, high, xhigh o max'
+const MODEL_HELP = 'Modelo: sonnet, opus, haiku o un id de modelo completo'
 
 /** Read at the top of the project file, refreshed on every write, never parsed as config. */
 export const PROJECT_FILE_HELP = [
   'Cada regla de proof-guardrails con el modo y los parámetros que estaban en vigor cuando se escribió este archivo.',
-  'Cambia "mode" para activar o desactivar: off (apagada), warn (avisa), ask (pide confirmación), deny (bloquea).',
+  'Cambia "mode" para activar o desactivar. "opciones" lista, por regla, qué hace cada modo y cada parámetro.',
   'Precedencia: regla > familia (p. ej. "irreversible") > "all" > global (/gates modo … global) > default.',
   'Como cada regla está escrita aquí, una clave de familia o "all" solo alcanza a reglas que no estén listadas.',
   '"agents": modelo (model) y esfuerzo (effort: low, medium, high, xhigh, max) de cada subagente del mod.',
-  '"descripcion" se actualiza sola; lo demás que edites se conserva. Reglas y agentes nuevos del mod se agregan al iniciar sesión.',
+  '"descripcion" y "opciones" se actualizan solas; lo demás que edites se conserva. Reglas y agentes nuevos del mod se agregan al iniciar sesión.',
 ]
 
 function settingOf(value: unknown): Record<string, unknown> {
@@ -167,17 +171,18 @@ export function withEverySetting(raw: unknown, effective: Config): { file: Recor
   for (const rule of CATALOG) {
     if (existing[rule.id] === undefined) added += 1
     const params = Object.fromEntries(Object.entries(rule.params ?? {}).map(([name, fallback]) => [name, paramOf(effective, rule.id, name, fallback)]))
-    const { [DESCRIPTION]: _staleRule, ...kept } = settingOf(existing[rule.id])
-    catalogRules[rule.id] = { [DESCRIPTION]: rule.summary, mode: modeOf(effective, rule.id), ...params, ...kept }
+    const { [DESCRIPTION]: _staleRule, [OPTIONS]: _staleRuleOptions, ...kept } = settingOf(existing[rule.id])
+    const options = { mode: MODE_HELP[rule.kind ?? 'action'], ...(rule.paramHelp ?? {}) }
+    catalogRules[rule.id] = { [DESCRIPTION]: rule.summary, [OPTIONS]: options, mode: modeOf(effective, rule.id), ...params, ...kept }
   }
   const otherRules = Object.fromEntries(Object.entries(existing).filter(([id]) => !RULE_IDS.has(id)))
   const existingAgents = isRecord(base.agents) ? base.agents : {}
   const roleAgents: Record<string, Record<string, unknown>> = {}
   for (const role of ROLES) {
     if (existingAgents[role.name] === undefined) added += 1
-    const { [DESCRIPTION]: _staleRole, ...kept } = settingOf(existingAgents[role.name])
+    const { [DESCRIPTION]: _staleRole, [OPTIONS]: _staleRoleOptions, ...kept } = settingOf(existingAgents[role.name])
     const override = effective.agents[role.name] ?? {}
-    roleAgents[role.name] = { [DESCRIPTION]: role.description, model: override.model ?? role.model, effort: override.effort ?? role.effort, ...kept }
+    roleAgents[role.name] = { [DESCRIPTION]: role.description, [OPTIONS]: { model: MODEL_HELP, effort: EFFORT_HELP }, model: override.model ?? role.model, effort: override.effort ?? role.effort, ...kept }
   }
   const otherAgents = Object.fromEntries(Object.entries(existingAgents).filter(([name]) => !ROLES.some(role => role.name === name)))
   const { $ayuda: _staleHelp, ...rest } = base
