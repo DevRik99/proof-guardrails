@@ -33,7 +33,8 @@ export function scopeOfPlanPath(path: string): string | undefined {
 }
 
 export function parsePlan(text: string): Plan {
-  const withoutFences = text.replace(/```[\s\S]*?```/g, '')
+  // A plan written on Windows ends lines in \r\n, which the line-anchored patterns below do not cross.
+  const withoutFences = text.replace(/\r\n?/g, '\n').replace(/```[\s\S]*?```/g, '')
   const title = /^#\s*Plan:\s*(.+)$/m.exec(withoutFences)?.[1]?.trim() ?? 'plan'
   const names = new Map<string, string>()
   for (const match of withoutFences.matchAll(/^\s*-\s+(\d+(?:\.\d+)*)\s+(.+?)\s+\S+\.md\s*$/gm)) {
