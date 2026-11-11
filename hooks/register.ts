@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { ROLES, rolePrompt, spawnContext, withoutInjected } from '../src/agents.ts'
 import { CATALOG, FAMILIES, MODES, RULE_IDS } from '../src/catalog.ts'
-import { compiles, materialized, mergeConfig, modeOf, paramOf, parseConfig, type Config, type UserRule } from '../src/config.ts'
+import { compiles, mergeConfig, modeOf, paramOf, parseConfig, withEverySetting, type Config, type UserRule } from '../src/config.ts'
 import { DISCIPLINE } from '../src/discipline.ts'
 import { findingsFor, judge, render, type Context, type Judged, type Verdict } from '../src/evaluate.ts'
 import { shellOf, textOf, writeIntentOf } from '../src/facts.ts'
@@ -98,6 +98,27 @@ async function loadConfig(engine: $): Promise<Config> {
   const global = parseConfig(await engine.store.get('config').catch(() => undefined))
   const project = parseConfig(await readJson(engine, PROJECT_CONFIG))
   return mergeConfig(global, project)
+}
+
+// A home folder or a temp folder can be a git repository too, and is never a project.
+const NOT_A_PROJECT = /^(([a-z]:)?[\\/]+(users|home)[\\/]+[^\\/]+|([a-z]:)?[\\/]+(tmp|var[\\/]+tmp)([\\/].*)?|.*[\\/]appdata[\\/]+local[\\/]+temp([\\/].*)?)[\\/]*$/i
+
+/** Spells out every rule in the project's .ai/gates.json when the session runs at a git root, so each is toggled there. */
+async function syncProjectConfig(engine: $, config: Config): Promise<void> {
+  const cwd = await engine.session.cwd()
+  if (NOT_A_PROJECT.test(cwd) || !(await engine.fs.exists(underCwd(cwd, '.git')).catch(() => false))) return
+  const present = await engine.fs.exists(PROJECT_CONFIG)
+  const text = present ? await engine.fs.read(PROJECT_CONFIG) : undefined
+  let raw: unknown
+  try {
+    raw = text === undefined ? undefined : JSON.parse(text)
+  } catch {
+    // A hand edit that broke the JSON is the person's to fix; rewriting it would lose it.
+    engine.ui.log(`proof-guardrails: ${PROJECT_CONFIG} no es JSON válido; no se tocó`)
+    return
+  }
+  const { file, changed } = withEverySetting(raw, config)
+  if (changed) await engine.fs.write(PROJECT_CONFIG, `${JSON.stringify(file, null, 2)}\n`)
 }
 
 async function declaredDependencies(engine: $): Promise<Set<string> | undefined> {
@@ -578,6 +599,7 @@ export const register: Register = on => {
     void mark($, 'session.start')
     const started = await next(e)
     const config = await loadConfig($)
+    await syncProjectConfig($, config).catch((error: unknown) => $.ui.log(`proof-guardrails: no se pudo escribir ${PROJECT_CONFIG} (${String(error).slice(0, 200)})`))
     await loadHistory($)
     await restoreTasks($).catch(() => undefined)
     void openPane($)
@@ -847,15 +869,9 @@ export const register: Register = on => {
     }
     if (verb === 'init') {
       if (!byPerson) return { text: 'Solo el usuario puede inicializar la configuración del proyecto.' }
-      const raw = ((await readJson($, PROJECT_CONFIG)) ?? {}) as { rules?: Record<string, Record<string, unknown>> }
-      const existing = raw.rules ?? {}
-      const defaults = materialized()
-      const rules: Record<string, Record<string, unknown>> = {}
-      for (const [id, setting] of Object.entries(defaults)) rules[id] = { ...setting, ...(existing[id] ?? {}) }
-      for (const [id, setting] of Object.entries(existing)) rules[id] ??= setting
-      const added = Object.keys(defaults).filter(id => existing[id] === undefined).length
-      await $.fs.write(PROJECT_CONFIG, `${JSON.stringify({ ...raw, rules }, null, 2)}\n`)
-      return { text: `${PROJECT_CONFIG}: ${added} regla(s) agregadas con su modo y parámetros por defecto; lo que ya tenías se conservó.` }
+      const { file, added } = withEverySetting(await readJson($, PROJECT_CONFIG), config)
+      await $.fs.write(PROJECT_CONFIG, `${JSON.stringify(file, null, 2)}\n`)
+      return { text: `${PROJECT_CONFIG}: ${added} regla(s) o agente(s) agregados con los valores en vigor; lo que ya tenías se conservó.` }
     }
     if (verb === 'panel') {
       const opened = await openPane($)

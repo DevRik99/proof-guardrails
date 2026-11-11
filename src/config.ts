@@ -1,4 +1,5 @@
-import { CATALOG, defaultMode, MODES } from './catalog.ts'
+import { ROLES } from './agents.ts'
+import { CATALOG, defaultMode, MODES, RULE_IDS } from './catalog.ts'
 import type { Mode } from './rules/types.ts'
 
 // Same philosophy as claude-gates: every rule is toggled and tuned per project
@@ -135,4 +136,51 @@ export function paramOf<T>(config: Config, id: string, name: string, fallback: T
 /** Every rule with its default mode and params, as `/gates init` writes them for a project. */
 export function materialized(): Record<string, RuleSetting> {
   return Object.fromEntries(CATALOG.map(rule => [rule.id, { mode: rule.mode, ...(rule.params ?? {}) }]))
+}
+
+const DESCRIPTION = 'descripcion'
+
+/** Read at the top of the project file, refreshed on every write, never parsed as config. */
+export const PROJECT_FILE_HELP = [
+  'Cada regla de proof-guardrails con el modo y los parámetros que estaban en vigor cuando se escribió este archivo.',
+  'Cambia "mode" para activar o desactivar: off (apagada), warn (avisa), ask (pide confirmación), deny (bloquea).',
+  'Precedencia: regla > familia (p. ej. "irreversible") > "all" > global (/gates modo … global) > default.',
+  'Como cada regla está escrita aquí, una clave de familia o "all" solo alcanza a reglas que no estén listadas.',
+  '"agents": modelo (model) y esfuerzo (effort: low, medium, high, xhigh, max) de cada subagente del mod.',
+  '"descripcion" se actualiza sola; lo demás que edites se conserva. Reglas y agentes nuevos del mod se agregan al iniciar sesión.',
+]
+
+function settingOf(value: unknown): Record<string, unknown> {
+  if (isMode(value)) return { mode: value }
+  return isRecord(value) ? value : {}
+}
+
+/**
+ * The project file with every catalog rule and agent role spelled out at the values `effective` puts in force,
+ * keeping whatever the file already says. `changed` is false when writing it back would change nothing.
+ */
+export function withEverySetting(raw: unknown, effective: Config): { file: Record<string, unknown>; added: number; changed: boolean } {
+  const base = isRecord(raw) ? raw : {}
+  const existing = isRecord(base.rules) ? base.rules : {}
+  const catalogRules: Record<string, Record<string, unknown>> = {}
+  let added = 0
+  for (const rule of CATALOG) {
+    if (existing[rule.id] === undefined) added += 1
+    const params = Object.fromEntries(Object.entries(rule.params ?? {}).map(([name, fallback]) => [name, paramOf(effective, rule.id, name, fallback)]))
+    const { [DESCRIPTION]: _staleRule, ...kept } = settingOf(existing[rule.id])
+    catalogRules[rule.id] = { [DESCRIPTION]: rule.summary, mode: modeOf(effective, rule.id), ...params, ...kept }
+  }
+  const otherRules = Object.fromEntries(Object.entries(existing).filter(([id]) => !RULE_IDS.has(id)))
+  const existingAgents = isRecord(base.agents) ? base.agents : {}
+  const roleAgents: Record<string, Record<string, unknown>> = {}
+  for (const role of ROLES) {
+    if (existingAgents[role.name] === undefined) added += 1
+    const { [DESCRIPTION]: _staleRole, ...kept } = settingOf(existingAgents[role.name])
+    const override = effective.agents[role.name] ?? {}
+    roleAgents[role.name] = { [DESCRIPTION]: role.description, model: override.model ?? role.model, effort: override.effort ?? role.effort, ...kept }
+  }
+  const otherAgents = Object.fromEntries(Object.entries(existingAgents).filter(([name]) => !ROLES.some(role => role.name === name)))
+  const { $ayuda: _staleHelp, ...rest } = base
+  const file = { $ayuda: PROJECT_FILE_HELP, ...rest, rules: { ...otherRules, ...catalogRules }, agents: { ...otherAgents, ...roleAgents } }
+  return { file, added, changed: JSON.stringify(file) !== JSON.stringify(raw) }
 }

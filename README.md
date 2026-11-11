@@ -50,6 +50,13 @@ claude plugin install proof-guardrails --marketplace DevRik99/proof-guardrails
 Todo se activa, desactiva y ajusta por proyecto en `.ai/gates.json`; lo global es el fallback
 y el proyecto gana. Un valor con tipo equivocado cae al default y nunca rompe la regla.
 
+Al iniciar sesión en la raíz de un repositorio git (no en tu carpeta de usuario ni en temporales),
+el mod escribe o completa `.ai/gates.json` con **cada regla y cada agente**, con su `descripcion`
+de qué hace y el modo y los parámetros en vigor en esa sesión (proyecto > global > default). Lo que
+ya editaste se conserva; solo se agregan reglas o agentes que falten y se refresca `descripcion`.
+Si el archivo no es JSON válido no se toca. Para apagar o cambiar algo, edita `mode` ahí.
+Como cada regla queda escrita, una clave de familia o `all` solo alcanza a reglas no listadas.
+
 ```json
 {
   "rules": {
@@ -75,7 +82,7 @@ Comandos (los que cambian configuración solo los ejecuta la persona):
 - `/gates panel`: el panel en vivo; si la superficie no acomoda paneles, dice el motivo y muestra la vista en texto.
 - `/gates reglas`: cada regla con su modo efectivo y de dónde sale (proyecto, global, default).
 - `/gates modo <regla|familia|all> <off|warn|ask|deny> [proyecto|global]`: proyecto por defecto.
-- `/gates init`: escribe en `.ai/gates.json` cada regla con su modo y parámetros por defecto, sin pisar lo existente.
+- `/gates init`: lo mismo que se hace al iniciar sesión, a pedido (sirve fuera de la raíz de un repo).
 - `/gates permisos <proyecto|usuario>`: escribe las reglas nativas `permissions.ask/deny` y la atribución vacía en `.claude/settings.local.json` o `~/.claude/settings.json`, con respaldo `.gates.bak`.
 
 Excepción justificada en reglas de criterio: `gates-allow: <regla> <motivo>` en el comando o

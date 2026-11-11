@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { CATALOG } from '../src/catalog.ts'
-import { materialized, mergeConfig, modeOf, paramOf, parseConfig } from '../src/config.ts'
+import { materialized, mergeConfig, modeOf, paramOf, parseConfig, withEverySetting } from '../src/config.ts'
+import { ROLES } from '../src/agents.ts'
 import { findingsFor, type Context } from '../src/evaluate.ts'
 import { shellOf } from '../src/facts.ts'
 import { emptyLedger } from '../src/ledger.ts'
@@ -73,5 +74,47 @@ describe('/gates init materializes every knob', () => {
     assert.equal(all['discipline.prompt']?.every, 15)
     assert.equal(all['irreversible.publish']?.mode, 'ask')
     assert.ok(Array.isArray(all['irreversible.destructive']?.regenerable))
+  })
+})
+
+describe('the project file spells out every setting', () => {
+  const rulesOf = (file: Record<string, unknown>) => file.rules as Record<string, Record<string, unknown>>
+  const agentsOf = (file: Record<string, unknown>) => file.agents as Record<string, Record<string, unknown>>
+
+  test('a missing file gets every rule and agent with its description and the values in force', () => {
+    const effective = mergeConfig(parseConfig({ rules: { irreversible: 'deny' }, agents: { builder: { model: 'opus' } } }), parseConfig(undefined))
+    const { file, added, changed } = withEverySetting(undefined, effective)
+    assert.equal(added, CATALOG.length + ROLES.length)
+    assert.ok(changed)
+    for (const rule of CATALOG) assert.equal(rulesOf(file)[rule.id]?.descripcion, rule.summary)
+    assert.equal(rulesOf(file)['irreversible.publish']?.mode, 'deny')
+    assert.equal(rulesOf(file)['forge.flow']?.mode, 'off')
+    assert.equal(agentsOf(file).builder?.model, 'opus')
+    assert.ok(typeof agentsOf(file).analyst?.descripcion === 'string')
+  })
+
+  test('what the person wrote survives; a stale description is refreshed', () => {
+    const raw = {
+      custom: 1,
+      rules: { 'edit.inline-script': { mode: 'off', descripcion: 'vieja' }, 'tasks.split': 'warn', irreversible: { mode: 'ask' } },
+      agents: { builder: { effort: 'low' } },
+      userRules: [],
+    }
+    const { file } = withEverySetting(raw, parseConfig(raw))
+    assert.equal(file.custom, 1)
+    assert.equal(rulesOf(file)['edit.inline-script']?.mode, 'off')
+    assert.equal(rulesOf(file)['edit.inline-script']?.descripcion, CATALOG.find(rule => rule.id === 'edit.inline-script')?.summary)
+    assert.equal(rulesOf(file)['tasks.split']?.mode, 'warn')
+    assert.deepEqual(rulesOf(file).irreversible, { mode: 'ask' })
+    assert.equal(agentsOf(file).builder?.effort, 'low')
+    assert.deepEqual(file.userRules, [])
+  })
+
+  test('the written file reads back to the same modes, and rewriting it changes nothing', () => {
+    const first = withEverySetting(undefined, parseConfig(undefined)).file
+    const again = withEverySetting(JSON.parse(JSON.stringify(first)), parseConfig(first))
+    assert.equal(again.changed, false)
+    assert.equal(again.added, 0)
+    for (const rule of CATALOG) assert.equal(modeOf(parseConfig(first), rule.id), rule.mode)
   })
 })
